@@ -1,0 +1,20 @@
+[package]
+name = "mqtt_tcp_server"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "Stateless MQTT TCP acknowledgment server for client performance tests"
+
+[dependencies]
+flowsdk = { version = "=0.7.0", default-features = false, features = ["std"] }
+bytes = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time", "sync"] }
+clap = { version = "4.5", features = ["derive"] }
+thiserror = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+[dev-dependencies]
+flowsdk = { version = "=0.7.0", default-features = false, features = ["async-client"] }
+async-trait = "0.1"
