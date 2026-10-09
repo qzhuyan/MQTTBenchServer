@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Check formatting
+        run: cargo +stable fmt --all -- --check
+      - name: Build
+        run: cargo +stable build --locked
+      - name: Test
+        run: cargo +stable test --locked
+      - name: Test strict protocol compliance
+        run: cargo +stable test --locked --features flowsdk/strict-protocol-compliance
+      - name: Clippy
+        run: cargo +stable clippy --locked --all-targets -- -D warnings
+
+  release:
+    name: Release (${{ matrix.target }})
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      RELEASE_TARGET: ${{ matrix.target }}
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools binutils
+      - name: Install stable Rust and target
+        run: rustup toolchain install stable --profile minimal --target "$RELEASE_TARGET"
+      - name: Build release binary
+        run: cargo +stable build --locked --release --target "$RELEASE_TARGET" --bin mqtt_tcp_server
+      - name: Verify static binary and startup
+        shell: bash
+        run: |
+          binary="target/$RELEASE_TARGET/release/mqtt_tcp_server"
+          readelf --program-headers "$binary" > program-headers.txt
+          readelf --dynamic "$binary" > dynamic-section.txt
+          if grep -q INTERP program-headers.txt || grep -q NEEDED dynamic-section.txt; then
+            echo "Expected a fully static musl binary" >&2
+            exit 1
+          fi
+          "$binary" --help
+      - name: Package binary and checksum
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -czf "dist/mqtt_tcp_server-$RELEASE_TARGET.tar.gz" \
+            -C "target/$RELEASE_TARGET/release" mqtt_tcp_server \
+            -C "$GITHUB_WORKSPACE" LICENSE README.md
+          cd dist
+          sha256sum "mqtt_tcp_server-$RELEASE_TARGET.tar.gz" > "mqtt_tcp_server-$RELEASE_TARGET.tar.gz.sha256"
+      - name: Upload release artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mqtt_tcp_server-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0

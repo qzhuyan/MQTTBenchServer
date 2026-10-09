@@ -123,3 +123,10 @@ does not produce. Record build mode, client/connection counts, packet sizes, QoS
 scrape interval, and metrics-enabled/disabled status with each result. Client
 enqueue rate is different from `pub_rcvd` reception rate, especially at QoS 0.
 
+## Tagged builds
+
+We deliver pre-builds with 0 dep for each tag:
+
+- `x86_64-unknown-linux-musl`
+- `aarch64-unknown-linux-musl`
+
