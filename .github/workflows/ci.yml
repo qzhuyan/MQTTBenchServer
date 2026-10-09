@@ -92,3 +92,44 @@ jobs:
           path: dist/*
           if-no-files-found: error
           compression-level: 0
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Download musl release artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mqtt_tcp_server-*-unknown-linux-musl
+          path: dist
+          merge-multiple: true
+      - name: Create release and upload assets
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          assets=()
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            archive="mqtt_tcp_server-$target.tar.gz"
+            test -s "$archive"
+            test -s "$archive.sha256"
+            sha256sum --check "$archive.sha256"
+            assets+=("$archive" "$archive.sha256")
+          done
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --verify-tag --generate-notes --title "$RELEASE_TAG"
+          fi

@@ -125,8 +125,13 @@ enqueue rate is different from `pub_rcvd` reception rate, especially at QoS 0.
 
 ## Tagged builds
 
-We deliver pre-builds with 0 dep for each tag:
+Every tag builds static Linux binaries for:
 
 - `x86_64-unknown-linux-musl`
 - `aarch64-unknown-linux-musl`
 
+Pushing a tag starting with `v` (for example, `v0.1.0`) also creates a
+[GitHub Release](https://github.com/qzhuyan/MQTTBenchServer/releases) after tests
+and both builds pass. The release includes both `.tar.gz` archives, their SHA-256
+checksums, and generated release notes. Rerunning the job updates the assets on
+an existing release. Other tags provide build artifacts in the CI run.
