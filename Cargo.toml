@@ -1,6 +1,6 @@
 [package]
 name = "mqtt_tcp_server"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MPL-2.0"
 description = "Stateless MQTT TCP acknowledgment server for client performance tests"
