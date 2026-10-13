@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 const ASSIGNED_ID_LEN: usize = 21; // "perf-" plus 16 hex digits
+const INITIAL_INPUT_BYTES: usize = 64;
+const INITIAL_OUTPUT_BYTES: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PerfServerError {
@@ -61,8 +63,9 @@ impl PerfServerEngine {
     pub fn new(config: PerfServerConfig) -> Result<Self, PerfServerError> {
         config.validate().map_err(PerfServerError::Config)?;
         Ok(Self {
-            input: Vec::with_capacity(config.max_input_bytes.min(1024)),
-            output: Vec::with_capacity(config.max_output_bytes.min(256)),
+            // Pending connections need no engine buffers. Allocate on first use.
+            input: Vec::new(),
+            output: Vec::new(),
             config,
             phase: Phase::AwaitConnect,
             version: 0,
@@ -127,11 +130,6 @@ impl PerfServerEngine {
                 if len > self.config.max_frame_bytes {
                     return Err(PerfServerError::FrameTooLarge);
                 }
-                if len > self.input.capacity() {
-                    // The size is now checked. Reserve once rather than growing
-                    // again for every fragment of a large publication.
-                    self.input.reserve_exact(len - self.input.len());
-                }
                 if self.input.len() == len {
                     if packets == self.config.max_packets_per_poll || !self.process_frame()? {
                         buffered_work = true;
@@ -152,7 +150,16 @@ impl PerfServerEngine {
             let room = declared.map_or(1, |len| len - self.input.len());
             let take = room.min(bytes.len() - consumed);
             if self.input.len() + take > self.input.capacity() {
-                self.input.reserve_exact(take);
+                // Grow with received data, not the peer's announced size.
+                // Doubling amortizes fragmented reads, bounded by this frame.
+                let capacity = self
+                    .input
+                    .capacity()
+                    .saturating_mul(2)
+                    .max(self.input.len() + take)
+                    .max(INITIAL_INPUT_BYTES)
+                    .min(declared.unwrap_or(self.config.max_frame_bytes));
+                self.input.reserve_exact(capacity - self.input.len());
             }
             self.input
                 .extend_from_slice(&bytes[consumed..consumed + take]);
@@ -189,6 +196,7 @@ impl PerfServerEngine {
                 .output
                 .capacity()
                 .saturating_mul(2)
+                .max(INITIAL_OUTPUT_BYTES)
                 .max(self.output.len() + required)
                 .min(self.config.max_output_bytes);
             self.output.reserve_exact(capacity - self.output.len());
@@ -405,5 +413,84 @@ impl<'a> Action<'a> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+
+    #[test]
+    fn idle_and_small_packet_connections_keep_small_buffers() {
+        let mut engine = PerfServerEngine::new(Default::default()).unwrap();
+        assert_eq!(engine.input.capacity() + engine.output.capacity(), 0);
+        engine
+            .feed(&[
+                0x10, 14, 0, 4, b'M', b'Q', b'T', b'T', 5, 2, 0, 0, 0, 0, 1, b'c',
+            ])
+            .unwrap();
+        assert_eq!(engine.output(), &[0x20, 3, 0, 0, 0]);
+        engine.consume_output(5).unwrap();
+        // Steady small-packet traffic reuses the allocations; it does not grow
+        // to the frame/output limits or shrink and allocate on every packet.
+        let capacity = (engine.input.capacity(), engine.output.capacity());
+        assert!(capacity.0 + capacity.1 <= 128);
+        for _ in 0..1000 {
+            engine.feed(&[0x32, 6, 0, 1, b't', 0, 1, 0]).unwrap();
+            assert_eq!(engine.output(), &[0x40, 2, 0, 1]);
+            engine.consume_output(4).unwrap();
+            assert_eq!(
+                (engine.input.capacity(), engine.output.capacity()),
+                capacity
+            );
+        }
+    }
+
+    #[test]
+    fn announced_length_does_not_allocate_the_whole_frame() {
+        let mut engine = PerfServerEngine::new(PerfServerConfig {
+            max_frame_bytes: 1024 * 1024,
+            max_input_bytes: 1024 * 1024,
+            ..Default::default()
+        })
+        .unwrap();
+        // Even when large frames are enabled, receiving only a header must not
+        // reserve a megabyte. No CONNECT/body processing is needed yet.
+        let mut header = Vec::new();
+        wire::encode_header(&mut header, 0x10, 1024 * 1024 - 4).unwrap();
+        engine.feed(&header).unwrap();
+        assert_eq!(engine.input.len(), 4);
+        assert!(engine.input.capacity() <= 64);
+        engine.feed(&[0; 100]).unwrap();
+        assert_eq!(engine.input.len(), 104);
+        assert!(engine.input.capacity() <= 128);
+    }
+
+    #[test]
+    fn default_parser_accepts_eight_kib_and_rejects_larger_frames_early() {
+        let mut engine = PerfServerEngine::new(Default::default()).unwrap();
+        engine
+            .feed(&[
+                0x10, 14, 0, 4, b'M', b'Q', b'T', b'T', 5, 2, 0, 0, 0, 0, 1, b'c',
+            ])
+            .unwrap();
+        engine.consume_output(5).unwrap();
+        let mut frame = Vec::new();
+        wire::encode_header(&mut frame, 0x30, 8192 - 3).unwrap();
+        frame.resize(8192, b'p');
+        for chunk in frame.chunks(257) {
+            assert_eq!(engine.feed(chunk).unwrap().consumed_input, chunk.len());
+            assert!(engine.input.capacity() <= 8192);
+        }
+        assert_eq!(engine.stats().pub_rcvd, 1);
+        assert!(engine.input.is_empty());
+        // One byte beyond the default whole-frame limit fails on its header.
+        let mut header = Vec::new();
+        wire::encode_header(&mut header, 0x30, 8192 - 2).unwrap();
+        assert!(matches!(
+            engine.feed(&header),
+            Err(PerfServerError::FrameTooLarge)
+        ));
+        assert_eq!(engine.stats().pub_rcvd, 1);
     }
 }

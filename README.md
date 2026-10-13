@@ -45,12 +45,40 @@ connection. Reserved QoS bits in PUBLISH/SUBSCRIBE, empty subscription lists,
 truncated required fields, and oversized frames/responses also close it. Keepalive
 is not enforced.
 
-Defaults: 1 MiB maximum frame/input, 64 KiB queued output, and 256 packets per
+Defaults: 8 KiB maximum frame/input, 64 KiB queued output, and 256 packets per
 engine call. A frame limit includes its fixed header. The input limit must cover
 a maximum frame. The engine buffers at most one frame at a time, reuses input and
 output storage, and admits the body only after checking its declared size. A
 response must fit the configured output limit; temporary output backpressure
 pauses processing without losing or duplicating responses.
+
+Per-connection buffers favor low memory usage:
+
+| Buffer           | Default allocation                                                                           |
+|------------------|----------------------------------------------------------------------------------------------|
+| TCP read scratch | 1 KiB, configured with `--read-buffer-bytes` (1–1,048,576 bytes); capped at the frame limit. |
+| Engine input     | No allocation before traffic; starts at 64 bytes, then grows with received data up to the checked frame limit. |
+| Engine output    | No allocation before a reply; starts at 64 bytes and grows as needed for reply batches.      |
+
+With a short CONNECT and small replies, these buffers use 1,152 bytes in total,
+down from 9,472 bytes. This excludes task/socket state and allocator overhead.
+The 8 KiB frame/input and 64 KiB output settings are limits, not upfront allocations.
+Larger frames and reply batches grow the engine buffers; capacity is reused until
+connection close to avoid allocating on every publication.
+
+The parser rejects frames over 8 KiB by default (including headers, topic, and
+payload). To permit larger frames, set both limits, for example:
+
+```sh
+mqtt_tcp_server --max-frame-bytes 1048576 --max-input-bytes 1048576
+```
+
+An announced size alone does not reserve that much memory: parser capacity grows
+as body bytes arrive. Larger configured limits permit larger retained buffers.
+
+Smaller reads may increase syscall frequency under heavy publish traffic. For
+larger read batches, use `--read-buffer-bytes 8192`; the MQTT packet limit is
+independent of the read buffer size. OS TCP send/receive buffers are unchanged.
 
 ## Prometheus metrics
 

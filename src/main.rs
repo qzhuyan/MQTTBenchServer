@@ -17,14 +17,19 @@ struct Args {
     no_metrics: bool,
     #[arg(long, value_enum, default_value = "when-requested")]
     fake_session_recovery: FakeSessionRecovery,
-    #[arg(long, default_value_t = 1_048_576)]
+    /// Maximum MQTT frame size, including its fixed header.
+    #[arg(long, default_value_t = 8192)]
     max_frame_bytes: usize,
-    #[arg(long, default_value_t = 1_048_576)]
+    /// Parser input limit; must cover one maximum frame.
+    #[arg(long, default_value_t = 8192)]
     max_input_bytes: usize,
     #[arg(long, default_value_t = 65_536)]
     max_output_bytes: usize,
     #[arg(long, default_value_t = 256)]
     max_packets_per_poll: usize,
+    /// Per-connection TCP read buffer, in bytes (1..=1048576).
+    #[arg(long, default_value_t = 1024)]
+    read_buffer_bytes: usize,
     #[arg(long, default_value_t = 10)]
     write_timeout_secs: u64,
     #[arg(long, default_value_t = 5)]
@@ -65,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..PerfServerConfig::default()
         },
         write_timeout: Duration::from_secs(args.write_timeout_secs),
+        read_buffer_bytes: args.read_buffer_bytes,
         shutdown_timeout: Duration::from_secs(args.shutdown_timeout_secs),
         metrics_timeout: Duration::from_secs(args.metrics_timeout_secs),
         max_scrapes: args.max_scrapes,

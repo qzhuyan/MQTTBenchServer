@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 mod common;
 
-use common::{connect, publish, read_frame, subscribe, wait_until, TestServer};
-use mqtt_tcp_server::{ServerConfig, TcpServer};
+use common::{connect, frame, publish, read_frame, subscribe, wait_until, TestServer};
+use mqtt_tcp_server::{PerfServerConfig, ServerConfig, TcpServer};
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -183,4 +183,82 @@ async fn metrics_can_be_disabled_and_bind_conflicts_fail_startup() {
         TcpServer::bind(config).await.err().unwrap().kind(),
         std::io::ErrorKind::AddrInUse
     );
+}
+
+#[tokio::test]
+async fn read_buffer_sizes_preserve_large_frames_and_pipelined_replies() {
+    for (read_buffer_bytes, max_frame_bytes) in [(1, 8192), (1024, 8192), (8192, 1024 * 1024)] {
+        let server = TestServer::start(ServerConfig {
+            read_buffer_bytes,
+            engine: PerfServerConfig {
+                max_frame_bytes,
+                max_input_bytes: max_frame_bytes,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+        for version in [4, 5] {
+            let mut socket = server.client(version).await;
+            // Cover the new 8 KiB default and explicit 1 MiB opt-in. Use 4 KiB
+            // for the deliberately one-byte read case.
+            let body_len = if read_buffer_bytes == 1 {
+                4096
+            } else if max_frame_bytes == 8192 {
+                max_frame_bytes - 3
+            } else {
+                max_frame_bytes - 4
+            };
+            let mut input = Vec::new();
+            for qos in [0, 1, 2] {
+                let mut body = vec![0, 1, b't'];
+                if qos != 0 {
+                    body.extend_from_slice(&[0, qos]);
+                }
+                if version == 5 {
+                    body.push(0);
+                }
+                body.resize(body_len, b'p');
+                input.extend(frame(0x30 | (qos << 1), &body));
+            }
+            input.extend_from_slice(&[0x62, 2, 0, 2]);
+            input.extend(subscribe(version, &[2; 300]));
+            input.extend_from_slice(&[0xc0, 0]);
+            timeout(Duration::from_secs(10), async {
+                socket.write_all(&input).await.unwrap();
+                for ack in [
+                    vec![0x40, 2, 0, 1],
+                    vec![0x50, 2, 0, 2],
+                    vec![0x70, 2, 0, 2],
+                ] {
+                    assert_eq!(read_frame(&mut socket).await, ack);
+                }
+                let mut suback = vec![0, 7];
+                if version == 5 {
+                    suback.push(0);
+                }
+                suback.extend_from_slice(&[2; 300]);
+                assert_eq!(read_frame(&mut socket).await, frame(0x90, &suback));
+                assert_eq!(read_frame(&mut socket).await, vec![0xd0, 0]);
+            })
+            .await
+            .unwrap();
+        }
+        wait_until(|| server.metrics.snapshot().connections == 0).await;
+        let stats = server.metrics.snapshot();
+        assert_eq!((stats.conn_rcvd, stats.pub_rcvd, stats.sub_rcvd), (2, 6, 2));
+        server.shutdown().await;
+    }
+}
+
+#[test]
+fn invalid_read_buffer_sizes_are_rejected() {
+    for read_buffer_bytes in [0, 1024 * 1024 + 1, usize::MAX] {
+        assert!(ServerConfig {
+            read_buffer_bytes,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+    }
 }

@@ -80,9 +80,10 @@ impl TcpServer {
                     let state = ConnectionState::new(engine, Arc::clone(&metrics));
                     let stop = stop_rx.clone();
                     let write_timeout = config.write_timeout;
+                    let read_buffer_bytes = config.read_buffer_bytes.min(config.engine.max_frame_bytes);
                     clients.spawn(async move {
                         let mut state = state;
-                        if drive(socket, &mut state, write_timeout, stop).await.is_err() {
+                        if drive(socket, &mut state, write_timeout, read_buffer_bytes, stop).await.is_err() {
                             state.metrics.error();
                         }
                     });
@@ -173,10 +174,12 @@ async fn drive(
     mut socket: TcpStream,
     state: &mut ConnectionState,
     write_timeout: Duration,
+    read_buffer_bytes: usize,
     mut stop: watch::Receiver<bool>,
 ) -> io::Result<()> {
     socket.set_nodelay(true)?;
-    let mut bytes = [0u8; 8192];
+    // Keep the async task small even when a caller opts into larger read batches.
+    let mut bytes = vec![0u8; read_buffer_bytes].into_boxed_slice();
     let (mut offset, mut end) = (0, 0);
     loop {
         if *stop.borrow() {
@@ -226,6 +229,20 @@ mod tests {
             ])
             .unwrap();
         ConnectionState::new(engine, Arc::new(BrokerMetrics::default()))
+    }
+
+    #[tokio::test]
+    async fn connection_future_does_not_embed_the_read_buffer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let mut state = pending_replies();
+        let (_tx, rx) = watch::channel(false);
+        let driver = drive(socket, &mut state, Duration::from_secs(1), 64 * 1024, rx);
+        // A larger configured read batch must not inflate the async task itself.
+        let size = std::mem::size_of_val(&driver);
+        assert!(size < 2048, "connection future is {size} bytes");
     }
 
     #[tokio::test]
